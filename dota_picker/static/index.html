@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="darkreader-lock">
+  <meta name="color-scheme" content="dark">
+  <title>Dota Picker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2 29 9v14L16 30 3 23V9z" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M10 22 22 10M18 10h4v4M10 10l4 4M18 18l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <h1>Dota Picker</h1>
+        <p>Counter-picks from Dotabuff stats</p>
+      </div>
+    </div>
+    <div class="status">
+      <span class="pill" id="updated"><i class="dot"></i><span>Loading data…</span></span>
+      <button id="refresh" class="icon-btn" title="Re-scrape Dotabuff now" aria-label="Refresh data">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card player-card">
+        <div class="card-head">
+          <h2>Your account</h2>
+          <button id="playerClear" class="text-btn" hidden>Remove</button>
+        </div>
+        <form id="playerForm" class="player-form">
+          <input id="playerInput" autocomplete="off" spellcheck="false" placeholder="Dotabuff profile URL or account id" aria-label="Dotabuff profile URL or account id">
+          <button type="submit" class="btn">Load</button>
+        </form>
+        <div id="playerInfo" class="player-info" hidden></div>
+        <p id="playerError" class="player-error" hidden></p>
+        <div id="playerOptions" class="player-options" hidden>
+          <div class="seg" id="playerPeriod" role="radiogroup" aria-label="Your games from">
+            <button role="radio" data-period="all">All time</button>
+            <button role="radio" data-period="recent">Last 12 months</button>
+          </div>
+          <div class="seg" id="poolMode" role="radiogroup" aria-label="Hero pool">
+            <button role="radio" data-mode="all">All heroes</button>
+            <button role="radio" data-mode="mine">My heroes</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Your position</h2>
+        <div class="positions" id="positions" role="radiogroup" aria-label="Your position"></div>
+        <label class="rank-row"><span>Rank</span><select id="rank" aria-label="Rank bracket for position stats"></select></label>
+      </section>
+
+      <section class="card enemy-card">
+        <div class="card-head">
+          <h2>Enemy team</h2>
+          <button id="clear" class="text-btn">Clear</button>
+        </div>
+        <div class="slots" id="enemySlots"></div>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="search" autocomplete="off" spellcheck="false" placeholder="Add enemy — am, qop, pl…" aria-label="Add enemy hero">
+          <ul id="suggest" class="suggest" hidden></ul>
+        </div>
+        <div class="keys">
+          <span><kbd>Enter</kbd> add</span>
+          <span><kbd>⌫</kbd> remove last</span>
+          <span><kbd>1</kbd>–<kbd>5</kbd> position</span>
+        </div>
+      </section>
+
+      <details class="card fold">
+        <summary><h2>Exclude heroes</h2><span class="count" id="excludeCount"></span></summary>
+        <p class="sub">Heroes your team picked or that are banned.</p>
+        <div class="slots small" id="excludeSlots"></div>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="excludeSearch" autocomplete="off" spellcheck="false" placeholder="Ally pick or ban" aria-label="Exclude hero">
+          <ul id="excludeSuggest" class="suggest" hidden></ul>
+        </div>
+      </details>
+
+      <details class="card fold">
+        <summary><h2>Tuning</h2></summary>
+        <label class="range">
+          <span>Min. games in this position</span>
+          <output id="minShareOut"></output>
+          <input type="range" id="minShare" min="0" max="50" step="1" value="10">
+        </label>
+        <label class="range">
+          <span>Lane matchup weight</span>
+          <output id="laneWeightOut"></output>
+          <input type="range" id="laneWeight" min="0" max="3" step="0.25" value="1">
+        </label>
+        <label class="range">
+          <span>Comfort weight (your games on hero)</span>
+          <output id="comfortWeightOut"></output>
+          <input type="range" id="comfortWeight" min="0" max="3" step="0.25" value="1">
+        </label>
+        <label class="range">
+          <span>"My heroes" = at least this many games</span>
+          <output id="minGamesOut"></output>
+          <input type="range" id="minGames" min="1" max="50" step="1" value="5">
+        </label>
+        <label class="range">
+          <span>Position win-rate weight</span>
+          <output id="metaWeightOut"></output>
+          <input type="range" id="metaWeight" min="0" max="3" step="0.25" value="1">
+        </label>
+      </details>
+    </aside>
+
+    <section class="results">
+      <div class="results-head">
+        <h2 id="resultsTitle">Best picks</h2>
+        <div class="legend" aria-label="Advantage colour legend">
+          <span class="sw neg"></span>countered<span class="sw mid"></span>even<span class="sw pos"></span>counters
+        </div>
+      </div>
+      <div class="featured" id="featured"></div>
+      <div class="avoid" id="avoid" hidden></div>
+      <div class="list" id="results" role="list"></div>
+      <p id="empty" class="empty" hidden></p>
+    </section>
+  </main>
+
+  <div class="drawer" id="drawer" hidden>
+    <div class="drawer-backdrop" data-close></div>
+    <aside class="drawer-panel" id="drawerPanel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" tabindex="-1">
+      <div id="drawerBody"></div>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
