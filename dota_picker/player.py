@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 
@@ -26,12 +27,28 @@ class PlayerError(Exception):
         self.status = status
 
 
-def parse_account_id(text: str) -> int:
-    """Accept a Steam32 id, Steam64 id, or a Dotabuff/OpenDota/Stratz profile URL."""
-    text = text.strip()
-    m = re.search(r"(?:players|player)/(\d+)", text) or re.fullmatch(r"(\d+)", text)
+def _resolve_vanity(name: str) -> str:
+    """steamcommunity.com/id/<name> -> Steam64 id, via the profile's public XML."""
+    url = f"https://steamcommunity.com/id/{urllib.parse.quote(name)}?xml=1"
+    req = urllib.request.Request(url, headers={"User-Agent": "dota-picker"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            m = re.search(r"<steamID64>(\d+)</steamID64>", r.read().decode(errors="replace"))
+    except urllib.error.URLError as e:
+        raise PlayerError(f"Could not reach Steam: {e}", 502) from e
     if not m:
-        raise PlayerError("Enter a Dotabuff profile URL or numeric account id")
+        raise PlayerError("Steam profile not found", 404)
+    return m.group(1)
+
+
+def parse_account_id(text: str) -> int:
+    """Accept a Steam32/Steam64 id, a Dotabuff/OpenDota/Stratz/Steam profile URL."""
+    text = text.strip()
+    if v := re.search(r"steamcommunity\.com/id/([\w.-]+)", text):
+        text = _resolve_vanity(v.group(1))
+    m = re.search(r"(?:players|player|profiles)/(\d+)", text) or re.fullmatch(r"(\d+)", text)
+    if not m:
+        raise PlayerError("Enter a Dotabuff or Steam profile URL, or a numeric account id")
     n = int(m.group(1))
     if n >= STEAM64_BASE:
         n -= STEAM64_BASE

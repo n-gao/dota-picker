@@ -1,3 +1,8 @@
+import threading
+import time
+
+import pytest
+
 from dota_picker import guides
 
 # Synthetic markup mirroring the structure of a Dotabuff guide block.
@@ -88,3 +93,38 @@ def test_build_falls_back_to_all_roles(monkeypatch):
 def test_asset_paths_are_whitelisted():
     assert guides.get_asset("../db.py") is None
     assert guides.get_asset("heroes/axe.jpg") is None
+
+
+def test_concurrent_requests_share_one_fetch(monkeypatch):
+
+    calls = []
+
+    def fetch(path):
+        calls.append(path)
+        time.sleep(0.05)
+        return page(guide())
+
+    monkeypatch.setattr(guides.scraper, "fetch", fetch)
+    threads = [threading.Thread(target=guides.get_guides, args=("axe",)) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == guides.PAGES  # one scrape, not five
+    assert len(guides.get_guides("axe")) == guides.PAGES  # now served from the cache
+    assert len(calls) == guides.PAGES
+
+
+def test_failed_fetch_backs_off(monkeypatch):
+    calls = []
+
+    def fetch(path):
+        calls.append(path)
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(guides.scraper, "fetch", fetch)
+    monkeypatch.setattr(guides, "_failed", {})
+    for _ in range(3):
+        with pytest.raises((ConnectionError, RuntimeError)):
+            guides.get_guides("lion")
+    assert len(calls) == 1  # later requests don't hit Dotabuff again

@@ -2,7 +2,8 @@
 
 Guides are fetched on demand per hero (a few pages), cached in SQLite for a day, and
 aggregated for the position you're drafting: common starting items, core items with
-typical timings, skill order and talents.
+typical timings, skill order and talents. Concurrent requests for a hero share one fetch,
+and a failed fetch isn't retried for a while, so Dotabuff sees as few requests as possible.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import json
 import logging
 import re
 import statistics
+import threading
+import time
 from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
@@ -21,6 +24,7 @@ from . import db, scraper
 
 PAGES = 4  # 5 guides per page
 MAX_AGE_SECONDS = 24 * 3600
+RETRY_AFTER_SECONDS = 15 * 60  # back off from Dotabuff after a failed fetch
 MIN_ROLE_GUIDES = 3  # fall back to all guides if fewer match your position
 CORE_SHARE = 0.4  # item in at least this share of final builds -> core
 SITUATIONAL_SHARE = 0.15
@@ -158,44 +162,90 @@ def _parse_guide(sec) -> dict:
 # ---------- fetching & caching ----------
 
 
-def get_guides(slug: str) -> list[dict]:
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+_failed: dict[str, float] = {}  # key -> monotonic time of the last failed fetch
+
+
+def _lock(key: str) -> threading.Lock:
+    """One lock per hero/asset, so concurrent requests share a single Dotabuff fetch."""
+    with _locks_guard:
+        return _locks.setdefault(key, threading.Lock())
+
+
+def _recently_failed(key: str) -> bool:
+    t = _failed.get(key)
+    return t is not None and time.monotonic() - t < RETRY_AFTER_SECONDS
+
+
+def _cached_guides(slug: str):
     with closing(_conn()) as conn:
-        row = conn.execute("SELECT * FROM hero_guides WHERE slug = ?", (slug,)).fetchone()
-    if row:
-        age = (datetime.now(UTC) - datetime.fromisoformat(row["fetched_at"])).total_seconds()
-        if age < MAX_AGE_SECONDS:
+        return conn.execute("SELECT * FROM hero_guides WHERE slug = ?", (slug,)).fetchone()
+
+
+def _fresh(row) -> bool:
+    age = (datetime.now(UTC) - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+    return age < MAX_AGE_SECONDS
+
+
+def get_guides(slug: str) -> list[dict]:
+    row = _cached_guides(slug)
+    if row and _fresh(row):
+        return json.loads(row["guides"])
+    with _lock(f"guides:{slug}"):
+        row = _cached_guides(slug)  # another request may have just fetched it
+        if row and (_fresh(row) or _recently_failed(slug)):
             return json.loads(row["guides"])
-    try:
-        guides = []
-        for page in range(1, PAGES + 1):
-            guides += parse_guides(scraper.fetch(f"/heroes/{slug}/guides" + (f"?page={page}" if page > 1 else "")))
-    except Exception:
-        if row:  # Dotabuff hiccup: serve stale guides
-            return json.loads(row["guides"])
-        raise
-    with closing(_conn()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO hero_guides VALUES (?, ?, ?)", (slug, db.now(), json.dumps(guides)))
-    return guides
+        if _recently_failed(slug):
+            raise RuntimeError("Dotabuff fetch failed recently, try again in a few minutes")
+        try:
+            guides = []
+            for page in range(1, PAGES + 1):
+                guides += parse_guides(scraper.fetch(f"/heroes/{slug}/guides" + (f"?page={page}" if page > 1 else "")))
+        except Exception:
+            _failed[slug] = time.monotonic()
+            if row:  # Dotabuff hiccup: serve stale guides
+                log.warning("Guide fetch for %s failed, serving cached copy", slug, exc_info=True)
+                return json.loads(row["guides"])
+            raise
+        _failed.pop(slug, None)
+        with closing(_conn()) as conn, conn:
+            conn.execute("INSERT OR REPLACE INTO hero_guides VALUES (?, ?, ?)", (slug, db.now(), json.dumps(guides)))
+        return guides
 
 
 ASSET_RE = re.compile(r"(items|skills)/[a-z0-9_-]+\.(?:jpg|png)")
+
+
+def _cached_asset(path: str) -> tuple[bytes, str] | None:
+    with closing(_conn()) as conn:
+        row = conn.execute("SELECT data, content_type FROM assets WHERE path = ?", (path,)).fetchone()
+    return (row["data"], row["content_type"]) if row else None
 
 
 def get_asset(path: str) -> tuple[bytes, str] | None:
     """Item/skill icon from the local cache, fetched from Dotabuff the first time."""
     if not ASSET_RE.fullmatch(path):
         return None
-    with closing(_conn()) as conn:
-        row = conn.execute("SELECT data, content_type FROM assets WHERE path = ?", (path,)).fetchone()
-    if row:
-        return row["data"], row["content_type"]
-    r = scraper._session().get(f"{scraper.BASE}/assets/{path}", timeout=30)
-    ctype = r.headers.get("content-type", "")
-    if r.status_code != 200 or not ctype.startswith("image"):
-        return None
-    with closing(_conn()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO assets VALUES (?, ?, ?)", (path, ctype, r.content))
-    return r.content, ctype
+    if cached := _cached_asset(path):
+        return cached
+    with _lock(f"asset:{path}"):
+        if cached := _cached_asset(path):
+            return cached
+        if _recently_failed(path):  # don't re-request missing icons on every page view
+            return None
+        try:
+            r = scraper._session().get(f"{scraper.BASE}/assets/{path}", timeout=30)
+        except Exception:
+            log.warning("Asset fetch for %s failed", path, exc_info=True)
+            r = None
+        ctype = r.headers.get("content-type", "") if r is not None else ""
+        if r is None or r.status_code != 200 or not ctype.startswith("image"):
+            _failed[path] = time.monotonic()
+            return None
+        with closing(_conn()) as conn, conn:
+            conn.execute("INSERT OR REPLACE INTO assets VALUES (?, ?, ?)", (path, ctype, r.content))
+        return r.content, ctype
 
 
 # ---------- aggregation ----------

@@ -13,6 +13,7 @@ from dota_picker.player import PlayerError, parse_account_id
         "https://www.opendota.com/players/105248644",
         "https://stratz.com/player/105248644",
         "76561198065514372",  # Steam64
+        "https://steamcommunity.com/profiles/76561198065514372/",
     ],
 )
 def test_parse_account_id(text):
